@@ -1,0 +1,11 @@
+data/
+features_vggface/
+checkpoints/
+*.pth
+*.pt
+*.pkl
+*.h5
+__pycache__/
+*.pyc
+*.log
+.env
