@@ -1,29 +1,30 @@
 # AVEC2014 Depression Recognition
 
-本项目用于基于 AVEC2014 视频数据集进行抑郁程度回归预测。当前流程分为两部分：
+本项目用于基于 AVEC2014 视频数据集进行抑郁程度回归预测。目前包含两套流程：
 
-1. 离线提取视频特征
-2. 使用时序模型进行训练与验证
-具体如下：
+1. 旧版：离线提取视频特征 + 时序回归模型（保存在 `legacy/` 目录，仅作对比基线）。
+2. 新版：端到端特征学习网络（FEM + FPN + 时序 Transformer + ViT Block）。
 
-特征提取：使用 facenet-pytorch 的 MTCNN 检测人脸，VGGFace2 预训练 InceptionResnetV1 提取 512 维人脸特征，光流帧同样提特征，全部离线保存为 .npy。
-模型结构：
-四路 TemporalStream（基于 Transformer Encoder），分别处理 Freeform/Northwind 两种任务下的 RGB/Flow 特征，每路输出 256 维。
-四路输出拼接（共 1024 维），送入回归头（两层全连接+LayerNorm+ReLU+Dropout），输出单一抑郁分数。
-训练细节：
-损失函数：MSELoss，评估指标为 MAE、RMSE。
-优化器：AdamW，weight_decay=1e-3。
-正则化：回归头用 LayerNorm 和 Dropout(p=0.6)。
-多卡训练：默认用前 4 张 GPU，支持 DataParallel。
-梯度裁剪，自动跳过 NaN/Inf loss，特征中的 NaN/Inf 会被清零。
-如需查看完整模型代码，请参考 main.py 中 UltimateDepressionModel 和 TemporalStream 的实现。
+旧版（legacy）流程：
+- 特征提取：使用 facenet-pytorch 的 MTCNN 检测人脸，VGGFace2 预训练 InceptionResnetV1 提取 512 维人脸特征，光流帧同样提特征，全部离线保存为 .npy。
+- 模型结构：四路 TemporalStream（基于 Transformer Encoder），分别处理 Freeform/Northwind 两种任务下的 RGB/Flow 特征，每路输出 256 维，四路输出拼接（1024 维）后接回归头。
+
+新版（端到端）流程：
+- 数据预处理：直接从原始 AVEC2014 视频中每 3 帧抽 1 帧，使用 MTCNN + OpenCV 仿射变换做人脸对齐；对每帧进行双尺度裁剪（全脸 / 局部面部），并在缩放到 256×256 时采用黑边 Padding 保持宽高比。
+- 空间骨干：双路 FEM（交替 ConvBlock + InBlock + Coordinate Attention + DenseBlock）分别处理全脸和局部脸特征，特征在通道维拼接后送入 FPN 做多尺度融合，输出 320 通道特征。
+- 时序与局部-全局提纯：将每帧 320 维特征序列送入 2 层 Transformer Encoder 建模帧间动态，并使用 Temporal Pooling 聚合为视频级表示；再送入自定义 ViT Block（Unfold→Transformer→Fold）进一步提炼局部与全局高级语义特征。
+- 回归头：在视频级特征后接 1×1 卷积 + 全连接层输出单一抑郁分数，训练中使用 Adam（β1=0.9, β2=0.999）、学习率 1e-4、Batch Size=4、weight_decay=5e-5，损失函数为 MSELoss。
 
 ## 项目结构
 
-- `extract_vggface_features.py`：使用 MTCNN + VGGFace2 预训练的 `InceptionResnetV1` 提取 RGB / Flow 特征，保存为 `.npy`
-- `train_depression.py`：独立训练脚本，自动解析 `train` / `dev` 划分并读取标签
-- `dataset.py`：通用数据集读取逻辑
-- `main.py`：主训练脚本，保留了当前实验使用的模型结构与训练流程
+- `legacy/extract_vggface_features.py`：旧版，使用 MTCNN + VGGFace2 提取 RGB / Flow 离线特征，保存为 `.npy`
+- `legacy/train_depression.py`：旧版训练脚本，自动解析 `train` / `dev` 划分并读取标签
+- `legacy/dataset.py`：旧版通用数据集读取逻辑（基于预提取特征）
+- `legacy/main.py`：旧版主训练脚本（四路 TemporalStream + 回归头）
+- `data/end2end_dataset.py`：新版端到端 AVEC2014 数据集，包含抽帧、MTCNN 检测与对齐、双尺度裁剪和 Padding
+- `models/fem_fpn.py`：FEM（含 Coordinate Attention + DenseBlock）与 FPN 的双路空间骨干实现
+- `models/temporal_vit.py`：时序 Transformer + ViT Block + 回归头的端到端回归模型
+- `end2end_train.py`：新版端到端训练脚本
 - `data/AVEC2014/`：数据集根目录
 
 ## 数据约定

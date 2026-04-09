@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-from dataset import AVEC2014Dataset
+from legacy.dataset import AVEC2014Dataset
 import os
 import glob
 import numpy as np
