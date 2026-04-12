@@ -289,6 +289,21 @@ class DualFEMWithFPN(nn.Module):
         # 双路拼接后为 [128, 192, 256, 320]，对应论文 Table 1 中 FPN(channels)
         self.fpn = FPN(in_channels_list=[128, 192, 256, 320], out_channels=320)
 
+    def load_pretrained_single_fem(self, state_dict: dict, strict: bool = True) -> None:
+        """将一份单路 FEMBackbone 的预训练权重加载到全脸与局部分支。
+
+        预期的 state_dict 通常来自 FEMExpressionNet.backbone.state_dict()，
+        即与 FEMBackbone 结构完全一致的权重。
+
+        参数：
+        - state_dict: 预训练的 FEMBackbone 权重
+        - strict: 是否严格匹配键名（默认 True，若后续结构有轻微改动可设为 False）
+        """
+
+        # 分别加载到 full_fem 和 local_fem，两路结构相同、参数独立。
+        self.full_fem.load_state_dict(state_dict, strict=strict)
+        self.local_fem.load_state_dict(state_dict, strict=strict)
+
     def forward(self, full_imgs: torch.Tensor, local_imgs: torch.Tensor) -> torch.Tensor:
         """输入形状：
         - full_imgs: (B*T, 3, 256, 256)

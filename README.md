@@ -1,31 +1,25 @@
 # AVEC2014 Depression Recognition
 
-本项目用于基于 AVEC2014 视频数据集进行抑郁程度回归预测。目前包含两套流程：
+本项目用于基于 AVEC2014 视频数据集进行抑郁程度回归预测，当前仅保留**端到端特征学习网络**（DNet 风格：FEM + FPN + 时序 Transformer + ViT Block），不再依赖 legacy 特征提取代码。
 
-1. 旧版：离线提取视频特征 + 时序回归模型（保存在 `legacy/` 目录，仅作对比基线）。
-2. 新版：端到端特征学习网络（FEM + FPN + 时序 Transformer + ViT Block）。
-
-旧版（legacy）流程：
-- 特征提取：使用 facenet-pytorch 的 MTCNN 检测人脸，VGGFace2 预训练 InceptionResnetV1 提取 512 维人脸特征，光流帧同样提特征，全部离线保存为 .npy。
-- 模型结构：四路 TemporalStream（基于 Transformer Encoder），分别处理 Freeform/Northwind 两种任务下的 RGB/Flow 特征，每路输出 256 维，四路输出拼接（1024 维）后接回归头。
-
-新版（端到端）流程：
-- 数据预处理：直接从原始 AVEC2014 视频中每 3 帧抽 1 帧，使用 MTCNN + OpenCV 仿射变换做人脸对齐；对每帧进行双尺度裁剪（全脸 / 局部面部），并在缩放到 256×256 时采用黑边 Padding 保持宽高比。
-- 空间骨干：双路 FEM（交替 ConvBlock + InBlock + Coordinate Attention + DenseBlock）分别处理全脸和局部脸特征，特征在通道维拼接后送入 FPN 做多尺度融合，输出 320 通道特征。
-- 时序与局部-全局提纯：将每帧 320 维特征序列送入 2 层 Transformer Encoder 建模帧间动态，并使用 Temporal Pooling 聚合为视频级表示；再送入自定义 ViT Block（Unfold→Transformer→Fold）进一步提炼局部与全局高级语义特征。
-- 回归头：在视频级特征后接 1×1 卷积 + 全连接层输出单一抑郁分数，训练中使用 Adam（β1=0.9, β2=0.999）、学习率 1e-4、Batch Size=4、weight_decay=5e-5，损失函数为 MSELoss。
+端到端（DNet 风格）流程概览：
+- 数据预处理：从原始 AVEC2014 视频中每 3 帧抽 1 帧，使用 MTCNN + OpenCV 仿射变换做人脸对齐；对每帧进行双尺度裁剪（全脸 / 局部面部），并在缩放到 256×256 时采用黑边 Padding 保持宽高比。预处理可离线一次性完成，保存为张量文件。  
+- 空间骨干（FEM + FPN）：双路 FEM（交替 ConvBlock + InBlock + Coordinate Attention + DenseBlock）分别处理全脸和局部脸特征，通道维拼接后送入 FPN 做多尺度融合，输出 320 通道特征图。  
+- 时序与局部-全局提纯：对每帧 320 维特征序列使用 2 层 Transformer Encoder 建模帧间动态，并做时序池化得到视频级表示；再送入 ViT Block（Unfold→Transformer→Fold）进一步提炼局部与全局高级语义特征。  
+- 回归头：在视频级特征后接 1×1 卷积 + 全连接层输出单一抑郁分数，训练中使用 Adam、MSELoss，支持混合精度与梯度累积。
 
 ## 项目结构
 
-- `legacy/extract_vggface_features.py`：旧版，使用 MTCNN + VGGFace2 提取 RGB / Flow 离线特征，保存为 `.npy`
-- `legacy/train_depression.py`：旧版训练脚本，自动解析 `train` / `dev` 划分并读取标签
-- `legacy/dataset.py`：旧版通用数据集读取逻辑（基于预提取特征）
-- `legacy/main.py`：旧版主训练脚本（四路 TemporalStream + 回归头）
-- `data/end2end_dataset.py`：新版端到端 AVEC2014 数据集，包含抽帧、MTCNN 检测与对齐、双尺度裁剪和 Padding
-- `models/fem_fpn.py`：FEM（含 Coordinate Attention + DenseBlock）与 FPN 的双路空间骨干实现
-- `models/temporal_vit.py`：时序 Transformer + ViT Block + 回归头的端到端回归模型
-- `end2end_train.py`：新版端到端训练脚本
-- `data/AVEC2014/`：数据集根目录
+- `data/end2end_dataset.py`：端到端 AVEC2014 数据集，包含抽帧、MTCNN 检测与对齐、双尺度裁剪和 Padding；同时提供 `PreprocessedAVEC2014Dataset` 读取离线预处理好的张量。  
+- `models/fem_fpn.py`：FEM（含 Coordinate Attention + DenseBlock）与 FPN 的双路空间骨干实现。  
+- `models/temporal_vit.py`：时序 Transformer + ViT Block + 回归头的端到端回归模型。  
+- `preprocess_avec2014.py`：从原始 AVEC2014 视频离线抽帧 + MTCNN + 对齐 + 裁剪 + Padding，将每个样本保存为 `.pt`（full/local 人脸序列 + mask + label）。  
+- `end2end_train.py`：端到端训练脚本（单卡），优先使用离线预处理数据，无则退回在线 MTCNN 预处理。  
+- `end2end_finetune.py`：从 `checkpoints/best_dnet_model.pth` 以较小学习率继续微调若干 epoch，最佳模型保存到 `checkpoints/best_dnet_model_ft.pth`。  
+- `end2end_eval.py`：加载最终模型（优先微调后的 `best_dnet_model_ft.pth`），在 AVEC2014 test 集上评估 MAE / RMSE。  
+- `data/AVEC2014/`：原始 AVEC2014 视频与标签根目录。  
+- `data/AVEC2014_preprocessed/`：离线预处理后的人脸张量文件根目录（按 `train/dev/test` 划分）。  
+- `checkpoints/`：保存端到端模型权重的目录。
 
 ## 数据约定
 
@@ -57,29 +51,6 @@
 
 文件内容为对应样本的抑郁分数。
 
-## 特征文件格式
-
-离线提取后的特征默认保存到：
-
-- `features_vggface/`
-
-文件命名格式：
-
-- `[SubjectID]_[Task]_RGB.npy`
-- `[SubjectID]_[Task]_Flow.npy`
-
-示例：
-
-- `203_1_Freeform_RGB.npy`
-- `203_1_Freeform_Flow.npy`
-- `203_1_Northwind_RGB.npy`
-- `203_1_Northwind_Flow.npy`
-
-每个 `.npy` 文件应为二维数组，形状类似：
-
-- `RGB`: `(T, 512)`
-- `Flow`: `(T, 512)`
-
 ## 环境依赖
 
 建议使用 `depress_cv` 虚拟环境。
@@ -104,53 +75,80 @@ source /data/hcf/miniconda3/etc/profile.d/conda.sh
 conda activate depress_cv
 ```
 
-### 2. 提取特征
+### 2. 离线预处理 AVEC2014（推荐）
 
 ```bash
-python extract_vggface_features.py
+cd /data/hcf/projects/avec_depression
+CUDA_VISIBLE_DEVICES=  # 可选，预处理主要跑在 CPU 上
+python preprocess_avec2014.py
 ```
 
-提取完成后，检查 `features_vggface/` 下是否已经生成 `.npy` 文件。
+完成后，应在 `data/AVEC2014_preprocessed/train|dev|test` 下看到若干 `.pt` 文件，每个文件包含：
 
-### 3. 训练模型
+- `full_faces`: `(T, 3, 256, 256)` 全脸序列张量（已归一化）；
+- `local_faces`: `(T, 3, 256, 256)` 局部脸序列张量；
+- `mask`: `(T,)` 帧掩码，True 表示 padding 帧；
+- `label`: 标量抑郁分数。
+
+### 3. 端到端训练（单卡）
 
 ```bash
-python train_depression.py
+CUDA_VISIBLE_DEVICES=1 python end2end_train.py
 ```
 
-该脚本会：
+脚本会：
 
-- 自动扫描 `train` 和 `dev` 目录中的视频样本
-- 从 `DepressionLabels` 中读取对应分数
-- 使用前 4 张 GPU 进行训练（如果可用）
-- 保存验证集 MAE 最优的模型到 `checkpoints/best_vggface_model.pth`
+- 优先使用 `data/AVEC2014_preprocessed/` 中的预处理数据；若不存在则在线从原始视频抽帧 + MTCNN；
+- 使用单卡训练，物理 `batch_size=1`，通过 `accumulation_steps=4` 实现等效 batch≈4；
+- 使用 AMP 混合精度与梯度裁剪，自动跳过非有限 loss；
+- 在 dev 集 MAE 最优时保存模型到 `checkpoints/best_dnet_model.pth`。
+
+### 4. 小学习率微调
+
+在得到初始最佳模型后，可用较小学习率做额外微调：
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python end2end_finetune.py
+```
+
+脚本会从 `checkpoints/best_dnet_model.pth` 加载权重，使用学习率 `1e-5` 再训练若干 epoch，并在 dev 集 MAE 进一步下降时将模型保存到：
+
+- `checkpoints/best_dnet_model_ft.pth`
+
+### 5. 在 test 集上评估
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python end2end_eval.py
+```
+
+脚本将优先加载 `best_dnet_model_ft.pth`，若不存在则退回 `best_dnet_model.pth`，并在 AVEC2014 test 集上输出：
+
+- `Test Loss (MSE)`
+- `Test MAE`
+- `Test RMSE`
 
 ## 训练说明
 
-当前训练脚本已经内置了以下稳定性策略：
+当前端到端训练 / 微调脚本已经内置了以下稳定性策略：
 
-- 特征中的 `NaN / Inf` 会被清理为 0
-- 回归头使用 `LayerNorm`，避免多卡小 batch 下 `BatchNorm` 报错
-- 训练和验证阶段都会跳过非有限 loss
-- 反向传播时使用梯度裁剪，减少数值爆炸风险
-- 默认只使用前 4 张 GPU，避免 8 卡切分导致单卡 batch 过小
+- 训练和验证阶段都会跳过非有限 loss（NaN / Inf）；
+- 使用 AMP 混合精度与 `torch.utils.checkpoint` 降低显存占用；
+- 反向传播时使用梯度裁剪，减少数值爆炸风险；
+- 单卡训练，避免多进程通信导致的不稳定因素；
+- 使用梯度累积，在较小显存下实现等效较大 batch。
 
 ## 输出
 
-训练过程中会输出：
+训练 / 微调过程中会输出：
 
 - `Train Loss`
+- `Val Loss (MSE)`
 - `Val MAE`
 - `Val RMSE`
 
-最优模型会保存到：
+最终模型文件：
 
-- `checkpoints/best_vggface_model.pth`
+- 初始最佳端到端模型：`checkpoints/best_dnet_model.pth`
+- 小学习率微调后最佳模型：`checkpoints/best_dnet_model_ft.pth`
 
-## 备注
-
-如果你后续切换了特征提取器，需要同步检查：
-
-- 特征维度是否仍为 512
-- `train_depression.py` 中的数据加载维度是否匹配
-- 特征输出目录是否仍为 `features_vggface/`
+评估脚本会在终端打印 test 集的 MAE / RMSE，可直接与 DNet 论文中的 AVEC2014 指标进行对比。

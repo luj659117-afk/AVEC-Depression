@@ -8,6 +8,7 @@ os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import torch
 import torch.nn as nn
 import torch.optim as optim
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from torch.utils.data import DataLoader
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 import torch.amp as amp
@@ -131,6 +132,15 @@ def main() -> None:
         state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         model.load_state_dict(state_dict)
         resumed = True
+    else:
+        # 若尚无端到端 DNet checkpoint，但存在 FEMBackbone 在 AffectNet 上的预训练权重，
+        # 则优先加载该预训练权重到 DualFEMWithFPN 的全脸和局部分支，作为更好的初始化。
+        fem_ckpt = os.path.join("checkpoints", "fem_backbone_affectnet.pth")
+        if os.path.exists(fem_ckpt):
+            print(f"Loading pretrained FEM backbone from {fem_ckpt}")
+            fem_state = torch.load(fem_ckpt, map_location="cpu", weights_only=True)
+            # spatial_backbone 是 DualFEMWithFPN 实例
+            model.spatial_backbone.load_pretrained_single_fem(fem_state, strict=False)
 
     # 超参数：Adam, lr=1e-4, weight_decay=5e-5, MSELoss
     # 若是从已有最优模型继续训练，则适当减小学习率，避免发散
@@ -149,6 +159,16 @@ def main() -> None:
 
     # 使用 AMP 混合精度训练以降低显存占用（新版 torch.amp 接口）
     scaler = amp.GradScaler("cuda", enabled=device.type == "cuda")
+
+    # 学习率调度器：当验证 MAE 连续若干 epoch 无明显改善时自动降低 lr，减小后期抖动
+    scheduler = ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=0.3,
+        patience=10,
+        verbose=True,
+        min_lr=1e-6,
+    )
 
     # 论文中训练轮数约为 50，这里适当增加到 150，结合早停可灵活控制
     num_epochs = 150
@@ -209,8 +229,12 @@ def main() -> None:
 
         print(
             f"Epoch {epoch:02d} | Train Loss: {train_loss:.4f} | "
-            f"Val Loss: {val_loss:.4f} | Val MAE: {val_mae:.4f} | Val RMSE: {val_rmse:.4f}"
+            f"Val Loss: {val_loss:.4f} | Val MAE: {val_mae:.4f} | Val RMSE: {val_rmse:.4f} | "
+            f"LR: {optimizer.param_groups[0]['lr']:.6f}"
         )
+
+        # 使用验证 MAE 作为调度依据，MAE 无法持续下降时自动减小学习率
+        scheduler.step(val_mae)
 
         if val_mae < best_mae:
             best_mae = val_mae
