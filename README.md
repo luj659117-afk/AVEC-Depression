@@ -11,14 +11,18 @@
 ## 项目结构
 
 - `data/end2end_dataset.py`：端到端 AVEC2014 数据集，包含抽帧、MTCNN 检测与对齐、双尺度裁剪和 Padding；同时提供 `PreprocessedAVEC2014Dataset` 读取离线预处理好的张量。  
+- `data/affectnet_dataset.py`：AffectNet 表情数据集封装（csv 解析 + bbox 裁剪 + 增强），用于 FEM / ResNet18 的表情预训练与 sanity check。  
 - `models/fem_fpn.py`：FEM（含 Coordinate Attention + DenseBlock）与 FPN 的双路空间骨干实现。  
 - `models/temporal_vit.py`：时序 Transformer + ViT Block + 回归头的端到端回归模型。  
 - `preprocess_avec2014.py`：从原始 AVEC2014 视频离线抽帧 + MTCNN + 对齐 + 裁剪 + Padding，将每个样本保存为 `.pt`（full/local 人脸序列 + mask + label）。  
 - `end2end_train.py`：端到端训练脚本（单卡），优先使用离线预处理数据，无则退回在线 MTCNN 预处理。  
 - `end2end_finetune.py`：从 `checkpoints/best_dnet_model.pth` 以较小学习率继续微调若干 epoch，最佳模型保存到 `checkpoints/best_dnet_model_ft.pth`。  
 - `end2end_eval.py`：加载最终模型（优先微调后的 `best_dnet_model_ft.pth`），在 AVEC2014 test 集上评估 MAE / RMSE。  
+- `fem_pretrain.py`：在 AffectNet 上用 FEMBackbone 做 7 类表情分类预训练，训练得到的 FEM 权重可选地加载到 DNet 的双路 FEM 中。  
+- `resnet18_affectnet_pretrain.py`：使用 torchvision ResNet18+ImageNet 预训练在 AffectNet 上做表情分类，用于 sanity check 数据与预处理管道。  
 - `data/AVEC2014/`：原始 AVEC2014 视频与标签根目录。  
 - `data/AVEC2014_preprocessed/`：离线预处理后的人脸张量文件根目录（按 `train/dev/test` 划分）。  
+- `data/AffectNet/`：AffectNet 表情数据集根目录（含 `training.csv` / `validation.csv` 及解压后的图片子目录），仅用于 FEM / ResNet18 表情预训练实验，不参与 AVEC2014 主流程。  
 - `checkpoints/`：保存端到端模型权重的目录。
 
 ## 数据约定
@@ -67,6 +71,24 @@
 - tqdm
 
 ## 运行流程
+
+### 0.（可选）AffectNet 上预训练 FEM / sanity check
+
+该步骤用于对齐论文中“先在 AffectNet 上预训练 FEM”的设定，但在当前实现下，对 AVEC2014 最终指标提升有限，因此完全可以跳过。只在你有兴趣复现实验时使用。
+
+- 在 AffectNet 上预训练 FEMBackbone：  
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python fem_pretrain.py
+```
+
+- 使用 ResNet18 在 AffectNet 上做 7 类表情分类 sanity check（验证数据与预处理逻辑）：  
+
+```bash
+CUDA_VISIBLE_DEVICES=1 python resnet18_affectnet_pretrain.py
+```
+
+若 `checkpoints/fem_backbone_affectnet.pth` 存在且当前没有端到端 checkpoint，`end2end_train.py` 会自动将其加载到 DNet 的双路 FEM 中作为初始化；否则退回随机初始化。
 
 ### 1. 激活环境
 
