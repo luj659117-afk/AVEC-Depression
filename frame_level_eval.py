@@ -92,9 +92,19 @@ def main() -> None:
     )
 
     model = SpatialDNet(in_channels=3).to(device)
-    ckpt_path = os.path.join("checkpoints", "best_spatial_dnet.pth")
-    if not os.path.exists(ckpt_path):
-        raise RuntimeError(f"Checkpoint not found: {ckpt_path}. Please run frame_level_train.py first.")
+
+    # 优先使用微调后的权重 best_spatial_dnet_ft.pth，若不存在则退回初始训练得到的 best_spatial_dnet.pth。
+    ckpt_ft = os.path.join("checkpoints", "best_spatial_dnet_ft.pth")
+    ckpt_base = os.path.join("checkpoints", "best_spatial_dnet.pth")
+    if os.path.exists(ckpt_ft):
+        ckpt_path = ckpt_ft
+        print(f"[FrameLevelEval] Using fine-tuned checkpoint: {ckpt_path}")
+    else:
+        ckpt_path = ckpt_base
+        if not os.path.exists(ckpt_path):
+            raise RuntimeError(
+                f"Checkpoint not found: {ckpt_path}. Please run frame_level_train.py (and optionally frame_level_finetune.py) first."
+            )
 
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
