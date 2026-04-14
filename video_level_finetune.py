@@ -27,7 +27,7 @@ class VideoFrameBagDataset(Dataset):
     def __init__(
         self,
         split: str = "train",
-        preprocessed_root: str = os.path.join("data", "AVEC2014_preprocessed"),
+        preprocessed_root: str = os.path.join("data", "AVEC2014_preprocessed_uniform96"),
         frames_per_video: int = 8,
         augment: bool = True,
     ) -> None:
@@ -219,9 +219,9 @@ def train_one_epoch(
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Video-level fine-tuning for SpatialDNet.")
-    parser.add_argument("--preprocessed-root", default=os.path.join("data", "AVEC2014_preprocessed"))
+    parser.add_argument("--preprocessed-root", default=os.path.join("data", "AVEC2014_preprocessed_uniform96"))
     parser.add_argument("--base-ckpt", default=os.path.join("checkpoints", "best_spatial_dnet_ft.pth"))
-    parser.add_argument("--out-ckpt", default=os.path.join("checkpoints", "best_spatial_dnet_video_ft.pth"))
+    parser.add_argument("--out-ckpt", default=os.path.join("checkpoints", "best_spatial_dnet_uniform96_video_ft.pth"))
     parser.add_argument("--frames-per-video", type=int, default=8)
     parser.add_argument("--batch-size", type=int, default=2)
     parser.add_argument("--grad-accum-steps", type=int, default=2)

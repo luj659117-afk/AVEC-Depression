@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -11,6 +12,14 @@ import torch.amp as amp
 
 from data.end2end_dataset import End2EndAVEC2014Dataset, PreprocessedAVEC2014Dataset
 from models.temporal_vit import End2EndDepressionModel
+
+
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_BASE_CKPT_CANDIDATES = [
+    os.path.join("checkpoints", "best_dnet_model_uniform96.pth"),
+    os.path.join("checkpoints", "best_dnet_model.pth"),
+]
+DEFAULT_OUT_CKPT = os.path.join("checkpoints", "best_dnet_model_uniform96_ft.pth")
 
 
 def validate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> Tuple[float, float, float]:
@@ -49,21 +58,34 @@ def validate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device:
 
 
 def main() -> None:
-    """从已有 best_dnet_model.pth 出发做小学习率微调。
+    """从已有 DNet checkpoint 出发做 96 帧版本小学习率微调。
 
     - 单卡 GPU 训练
     - 使用预处理好的 AVEC2014 数据（若存在）
     - 学习率固定为 1e-5，只训练 20 个 epoch
-    - 将更优的模型保存为 checkpoints/best_dnet_model_ft.pth
+    - 将更优的模型保存为 checkpoints/best_dnet_model_uniform96_ft.pth
     """
+
+    parser = argparse.ArgumentParser(description="Fine-tune end-to-end temporal DNet on AVEC2014.")
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
+    parser.add_argument("--max-frames", type=int, default=96)
+    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="uniform")
+    parser.add_argument("--temporal-chunks", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--lr", type=float, default=1e-5)
+    parser.add_argument("--weight-decay", type=float, default=5e-5)
+    parser.add_argument("--accumulation-steps", type=int, default=4)
+    parser.add_argument("--base-ckpt", default=None)
+    parser.add_argument("--out-ckpt", default=DEFAULT_OUT_CKPT)
+    args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     rank = 0
 
     # 数据：优先使用预处理版本
-    max_frames = 48
+    max_frames = args.max_frames
     image_size = 256
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
+    preprocessed_root = args.preprocessed_root
 
     use_preprocessed = False
     preprocessed_train_dir = os.path.join(preprocessed_root, "train")
@@ -76,8 +98,20 @@ def main() -> None:
         dev_dataset = PreprocessedAVEC2014Dataset(split="dev", preprocessed_root=preprocessed_root)
     else:
         print("[finetune] Preprocessed data not found, falling back to online MTCNN preprocessing from raw videos.")
-        train_dataset = End2EndAVEC2014Dataset(split="train", device="cpu", max_frames=max_frames, image_size=image_size)
-        dev_dataset = End2EndAVEC2014Dataset(split="dev", device="cpu", max_frames=max_frames, image_size=image_size)
+        train_dataset = End2EndAVEC2014Dataset(
+            split="train",
+            device="cpu",
+            max_frames=max_frames,
+            image_size=image_size,
+            temporal_sample=args.temporal_sample,
+        )
+        dev_dataset = End2EndAVEC2014Dataset(
+            split="dev",
+            device="cpu",
+            max_frames=max_frames,
+            image_size=image_size,
+            temporal_sample=args.temporal_sample,
+        )
 
     train_loader = DataLoader(
         train_dataset,
@@ -100,36 +134,47 @@ def main() -> None:
     visible_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     use_ckpt = (device.type == "cuda") and (visible_gpus >= 1)
     model = End2EndDepressionModel(
-        temporal_chunks=4,
+        temporal_chunks=args.temporal_chunks,
         use_checkpoint_temporal=use_ckpt,
         use_checkpoint_vit=use_ckpt,
     ).to(device)
 
-    ckpt_path = os.path.join("checkpoints", "best_dnet_model.pth")
-    if not os.path.exists(ckpt_path):
-        raise RuntimeError(f"[finetune] Cannot find base checkpoint: {ckpt_path}")
+    ckpt_path = args.base_ckpt
+    if ckpt_path is None:
+        ckpt_path = next((path for path in DEFAULT_BASE_CKPT_CANDIDATES if os.path.exists(path)), None)
+    if ckpt_path is None or not os.path.exists(ckpt_path):
+        raise RuntimeError(
+            f"[finetune] Cannot find base checkpoint. Checked: {DEFAULT_BASE_CKPT_CANDIDATES}. "
+            "Pass --base-ckpt to use a specific checkpoint."
+        )
 
     print(f"[finetune] Loading base weights from {ckpt_path}")
     state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict)
 
     # 小学习率微调
-    lr = 1e-5
+    lr = args.lr
     optimizer = optim.Adam(
         model.parameters(),
         lr=lr,
         betas=(0.9, 0.999),
-        weight_decay=5e-5,
+        weight_decay=args.weight_decay,
     )
     criterion = nn.MSELoss()
     scaler = amp.GradScaler("cuda", enabled=device.type == "cuda")
 
-    num_epochs = 20
+    num_epochs = args.epochs
     best_mae = float("inf")
-    os.makedirs("checkpoints", exist_ok=True)
-    out_path = os.path.join("checkpoints", "best_dnet_model_ft.pth")
+    out_dir = os.path.dirname(args.out_ckpt)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    out_path = args.out_ckpt
 
-    print(f"[finetune] Start finetuning for {num_epochs} epochs on {device}, lr={lr}")
+    print(
+        f"[finetune] Start finetuning for {num_epochs} epochs on {device}, lr={lr} | "
+        f"preprocessed_root={preprocessed_root} | max_frames={max_frames} | "
+        f"temporal_chunks={args.temporal_chunks} | out_ckpt={out_path}"
+    )
 
     for epoch in range(num_epochs):
         model.train()
@@ -137,7 +182,7 @@ def main() -> None:
         steps = 0
 
         optimizer.zero_grad()
-        accumulation_steps = 4
+        accumulation_steps = args.accumulation_steps
         accum_count = 0
 
         for batch_idx, (full_faces, local_faces, mask, labels) in enumerate(train_loader):

@@ -8,10 +8,10 @@ from data.end2end_dataset import End2EndAVEC2014Dataset
 @torch.no_grad()
 def preprocess_split(
     split: str,
-    out_root: str = "data/AVEC2014_preprocessed",
-    max_frames: int = 48,
+    out_root: str = "data/AVEC2014_preprocessed_uniform96",
+    max_frames: int = 96,
     image_size: int = 256,
-    temporal_sample: str = "legacy",
+    temporal_sample: str = "uniform",
     device: str = "cpu",
     overwrite: bool = False,
 ) -> None:
@@ -61,10 +61,10 @@ def preprocess_split(
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Preprocess AVEC2014 videos into full/local face tensors.")
-    parser.add_argument("--out-root", default="data/AVEC2014_preprocessed")
-    parser.add_argument("--max-frames", type=int, default=48)
+    parser.add_argument("--out-root", default="data/AVEC2014_preprocessed_uniform96")
+    parser.add_argument("--max-frames", type=int, default=96)
     parser.add_argument("--image-size", type=int, default=256)
-    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="legacy")
+    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="uniform")
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--splits", nargs="+", default=["train", "dev", "test"], choices=["train", "dev", "test"])

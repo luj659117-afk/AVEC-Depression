@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -12,6 +13,15 @@ import torch.amp as amp
 
 from data.frame_level_avec2014 import FrameLevelAVEC2014TrainDataset, FrameLevelAVEC2014EvalDataset
 from models.spatial_dnet import SpatialDNet
+
+
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_BASE_CKPT_CANDIDATES = [
+    os.path.join("checkpoints", "best_spatial_dnet_uniform96.pth"),
+    os.path.join("checkpoints", "best_spatial_dnet_ft.pth"),
+    os.path.join("checkpoints", "best_spatial_dnet.pth"),
+]
+DEFAULT_OUT_CKPT = os.path.join("checkpoints", "best_spatial_dnet_uniform96_ft.pth")
 
 
 @torch.no_grad()
@@ -77,25 +87,36 @@ def validate(
 
 
 def main() -> None:
-    """从 best_spatial_dnet.pth 出发进行小学习率 fine-tune。"""
+    """从已有 SpatialDNet checkpoint 出发进行 96 帧版本小学习率 fine-tune。"""
+
+    parser = argparse.ArgumentParser(description="Fine-tune frame-level SpatialDNet on AVEC2014.")
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
+    parser.add_argument("--frames-per-video", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--eval-batch-size", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=40)
+    parser.add_argument("--lr", type=float, default=2e-5)
+    parser.add_argument("--weight-decay", type=float, default=5e-5)
+    parser.add_argument("--base-ckpt", default=None)
+    parser.add_argument("--out-ckpt", default=DEFAULT_OUT_CKPT)
+    args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
 
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
     train_dataset = FrameLevelAVEC2014TrainDataset(
         split="train",
-        preprocessed_root=preprocessed_root,
-        frames_per_video=16,
+        preprocessed_root=args.preprocessed_root,
+        frames_per_video=args.frames_per_video,
     )
     dev_dataset = FrameLevelAVEC2014EvalDataset(
         split="dev",
-        preprocessed_root=preprocessed_root,
+        preprocessed_root=args.preprocessed_root,
     )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=64,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
@@ -111,9 +132,14 @@ def main() -> None:
     )
 
     model = SpatialDNet(in_channels=3).to(device)
-    base_ckpt = os.path.join("checkpoints", "best_spatial_dnet.pth")
-    if not os.path.exists(base_ckpt):
-        raise RuntimeError(f"Base checkpoint not found: {base_ckpt}. Please run frame_level_train.py first.")
+    base_ckpt = args.base_ckpt
+    if base_ckpt is None:
+        base_ckpt = next((path for path in DEFAULT_BASE_CKPT_CANDIDATES if os.path.exists(path)), None)
+    if base_ckpt is None or not os.path.exists(base_ckpt):
+        raise RuntimeError(
+            f"Base checkpoint not found. Checked: {DEFAULT_BASE_CKPT_CANDIDATES}. "
+            "Please run frame_level_train.py first or pass --base-ckpt."
+        )
 
     state = torch.load(base_ckpt, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
@@ -122,9 +148,9 @@ def main() -> None:
     # 小学习率微调
     optimizer = optim.Adam(
         model.parameters(),
-        lr=2e-5,
+        lr=args.lr,
         betas=(0.9, 0.999),
-        weight_decay=5e-5,
+        weight_decay=args.weight_decay,
     )
     criterion = nn.MSELoss()
     scaler = amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -138,10 +164,35 @@ def main() -> None:
         min_lr=1e-6,
     )
 
-    num_epochs = 40
+    num_epochs = args.epochs
     best_mae = float("inf")
-    os.makedirs("checkpoints", exist_ok=True)
-    ckpt_path = os.path.join("checkpoints", "best_spatial_dnet_ft.pth")
+    out_dir = os.path.dirname(args.out_ckpt)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    ckpt_path = args.out_ckpt
+
+    print(
+        f"[FrameLevelFinetune] preprocessed_root={args.preprocessed_root} | "
+        f"frames_per_video={args.frames_per_video} | batch_size={args.batch_size} | "
+        f"base_ckpt={base_ckpt} | out_ckpt={ckpt_path}"
+    )
+
+    if num_epochs <= 0:
+        print("[FrameLevelFinetune] epochs <= 0, exiting after setup.")
+        return
+
+    base_val_loss, best_mae, base_val_rmse = validate(
+        model,
+        dev_loader,
+        device,
+        eval_batch_size=args.eval_batch_size,
+    )
+    torch.save(model.state_dict(), ckpt_path)
+    print(
+        f"[FrameLevelFinetune] Base Dev Loss: {base_val_loss:.4f} | "
+        f"Base Dev MAE: {best_mae:.4f} | Base Dev RMSE: {base_val_rmse:.4f} | "
+        f"saved baseline to {ckpt_path}"
+    )
 
     for epoch in range(num_epochs):
         model.train()
@@ -175,7 +226,7 @@ def main() -> None:
             continue
 
         train_loss = running_loss / steps
-        val_loss, val_mae, val_rmse = validate(model, dev_loader, device)
+        val_loss, val_mae, val_rmse = validate(model, dev_loader, device, eval_batch_size=args.eval_batch_size)
 
         print(
             f"[FrameLevelFinetune] Epoch {epoch:02d} | "

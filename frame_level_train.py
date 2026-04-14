@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -12,6 +13,10 @@ import torch.amp as amp
 
 from data.frame_level_avec2014 import FrameLevelAVEC2014TrainDataset, FrameLevelAVEC2014EvalDataset
 from models.spatial_dnet import SpatialDNet
+
+
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_CKPT_PATH = os.path.join("checkpoints", "best_spatial_dnet_uniform96.pth")
 
 
 @torch.no_grad()
@@ -86,28 +91,38 @@ def validate(
 def main() -> None:
     """帧级 DNet 训练入口：
 
-    - 使用 data/AVEC2014_preprocessed 下的离线预处理结果；
+    - 默认使用 data/AVEC2014_preprocessed_uniform96 下的离线预处理结果；
     - 训练时每个样本是一帧 (full, local) 图像对；
     - 评估时对每个视频的所有有效帧得分做平均作为视频级预测。
     """
 
+    parser = argparse.ArgumentParser(description="Train frame-level SpatialDNet on AVEC2014.")
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
+    parser.add_argument("--frames-per-video", type=int, default=16)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--eval-batch-size", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=100)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--weight-decay", type=float, default=5e-5)
+    parser.add_argument("--out-ckpt", default=DEFAULT_CKPT_PATH)
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     torch.backends.cudnn.benchmark = True
 
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
     train_dataset = FrameLevelAVEC2014TrainDataset(
         split="train",
-        preprocessed_root=preprocessed_root,
-        frames_per_video=16,
+        preprocessed_root=args.preprocessed_root,
+        frames_per_video=args.frames_per_video,
     )
     dev_dataset = FrameLevelAVEC2014EvalDataset(
         split="dev",
-        preprocessed_root=preprocessed_root,
+        preprocessed_root=args.preprocessed_root,
     )
 
     train_loader = DataLoader(
         train_dataset,
-        batch_size=64,
+        batch_size=args.batch_size,
         shuffle=True,
         num_workers=4,
         pin_memory=True,
@@ -133,9 +148,9 @@ def main() -> None:
 
     optimizer = optim.Adam(
         model.parameters(),
-        lr=1e-4,
+        lr=args.lr,
         betas=(0.9, 0.999),
-        weight_decay=5e-5,
+        weight_decay=args.weight_decay,
     )
     criterion = nn.MSELoss()
     scaler = amp.GradScaler("cuda", enabled=device.type == "cuda")
@@ -149,10 +164,18 @@ def main() -> None:
         min_lr=1e-6,
     )
 
-    num_epochs = 100
+    num_epochs = args.epochs
     best_mae = float("inf")
-    os.makedirs("checkpoints", exist_ok=True)
-    ckpt_path = os.path.join("checkpoints", "best_spatial_dnet.pth")
+    out_dir = os.path.dirname(args.out_ckpt)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    ckpt_path = args.out_ckpt
+
+    print(
+        f"[FrameLevelTrain] preprocessed_root={args.preprocessed_root} | "
+        f"frames_per_video={args.frames_per_video} | batch_size={args.batch_size} | "
+        f"out_ckpt={ckpt_path}"
+    )
 
     for epoch in range(num_epochs):
         model.train()
@@ -186,7 +209,7 @@ def main() -> None:
             continue
 
         train_loss = running_loss / steps
-        val_loss, val_mae, val_rmse = validate(model, dev_loader, device)
+        val_loss, val_mae, val_rmse = validate(model, dev_loader, device, eval_batch_size=args.eval_batch_size)
 
         print(
             f"[FrameLevelTrain] Epoch {epoch:02d} | "

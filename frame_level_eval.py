@@ -13,6 +13,15 @@ from data.frame_level_avec2014 import FrameLevelAVEC2014EvalDataset
 from models.spatial_dnet import SpatialDNet
 
 
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_CKPT_CANDIDATES = [
+    os.path.join("checkpoints", "best_spatial_dnet_uniform96_ft.pth"),
+    os.path.join("checkpoints", "best_spatial_dnet_uniform96.pth"),
+    os.path.join("checkpoints", "best_spatial_dnet_ft.pth"),
+    os.path.join("checkpoints", "best_spatial_dnet.pth"),
+]
+
+
 @torch.no_grad()
 def evaluate(
     model: nn.Module,
@@ -80,9 +89,9 @@ def main() -> None:
     parser.add_argument(
         "--checkpoint",
         default=None,
-        help="Optional checkpoint path. If omitted, use best_spatial_dnet_ft.pth then best_spatial_dnet.pth.",
+        help="Optional checkpoint path. If omitted, prefer uniform-96 checkpoints, then old checkpoints.",
     )
-    parser.add_argument("--preprocessed-root", default=os.path.join("data", "AVEC2014_preprocessed"))
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
     parser.add_argument("--eval-batch-size", type=int, default=64)
     args = parser.parse_args()
 
@@ -109,18 +118,14 @@ def main() -> None:
             raise RuntimeError(f"Checkpoint not found: {ckpt_path}")
         print(f"[FrameLevelEval] Using specified checkpoint: {ckpt_path}")
     else:
-        # 优先使用微调后的权重 best_spatial_dnet_ft.pth，若不存在则退回初始训练得到的 best_spatial_dnet.pth。
-        ckpt_ft = os.path.join("checkpoints", "best_spatial_dnet_ft.pth")
-        ckpt_base = os.path.join("checkpoints", "best_spatial_dnet.pth")
-        if os.path.exists(ckpt_ft):
-            ckpt_path = ckpt_ft
-            print(f"[FrameLevelEval] Using fine-tuned checkpoint: {ckpt_path}")
-        else:
-            ckpt_path = ckpt_base
-            if not os.path.exists(ckpt_path):
-                raise RuntimeError(
-                    f"Checkpoint not found: {ckpt_path}. Please run frame_level_train.py (and optionally frame_level_finetune.py) first."
-                )
+        # 96-frame checkpoints are preferred, then older 48-frame checkpoints are used as fallback.
+        ckpt_path = next((path for path in DEFAULT_CKPT_CANDIDATES if os.path.exists(path)), None)
+        if ckpt_path is None:
+            raise RuntimeError(
+                f"Checkpoint not found. Checked: {DEFAULT_CKPT_CANDIDATES}. "
+                "Please run frame_level_train.py (and optionally frame_level_finetune.py) first."
+            )
+        print(f"[FrameLevelEval] Using checkpoint: {ckpt_path}")
 
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state)

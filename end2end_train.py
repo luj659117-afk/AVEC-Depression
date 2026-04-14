@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -15,6 +16,10 @@ import torch.amp as amp
 
 from data.end2end_dataset import End2EndAVEC2014Dataset, PreprocessedAVEC2014Dataset
 from models.temporal_vit import End2EndDepressionModel
+
+
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_CKPT_PATH = os.path.join("checkpoints", "best_dnet_model_uniform96.pth")
 
 
 def validate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device: torch.device) -> Tuple[float, float, float]:
@@ -53,20 +58,34 @@ def validate(model: nn.Module, loader: DataLoader, criterion: nn.Module, device:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Train end-to-end temporal DNet on AVEC2014.")
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
+    parser.add_argument("--max-frames", type=int, default=96)
+    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="uniform")
+    parser.add_argument("--temporal-chunks", type=int, default=8)
+    parser.add_argument("--epochs", type=int, default=150)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--resume-lr", type=float, default=2e-5)
+    parser.add_argument("--weight-decay", type=float, default=5e-5)
+    parser.add_argument("--train-batch-size", type=int, default=1)
+    parser.add_argument("--accumulation-steps", type=int, default=4)
+    parser.add_argument("--out-ckpt", default=DEFAULT_CKPT_PATH)
+    args = parser.parse_args()
+
     # 仅使用单机单卡训练，简化分布式逻辑，避免多进程通信带来的不稳定性。
     rank = 0
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 单卡：batch=1、累积 4 次，对齐论文有效 batch≈4。
-    train_batch_size = 1
-    accumulation_steps = 4
+    train_batch_size = args.train_batch_size
+    accumulation_steps = args.accumulation_steps
 
     torch.backends.cudnn.benchmark = True
     # 数据部分：优先使用离线预处理好的人脸特征（与论文设置一致），
     # 若预处理目录不存在或为空，则退化为在线从原始视频抽帧 + MTCNN 方式。
-    max_frames = 48
+    max_frames = args.max_frames
     image_size = 256
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
+    preprocessed_root = args.preprocessed_root
 
     use_preprocessed = False
     preprocessed_train_dir = os.path.join(preprocessed_root, "train")
@@ -85,10 +104,21 @@ def main() -> None:
         # 对齐论文设置：
         # - 输入分辨率 image_size = 256
         # - batch_size = 4（见下方 DataLoader 设置）
-        # 为了在 24G 显存下稳定训练，同时仍保持较长的时序信息，
-        # 将每段视频使用的最大帧数设为 48 帧，并在数据集中对训练样本做随机时间采样。
-        train_dataset = End2EndAVEC2014Dataset(split="train", device="cpu", max_frames=max_frames, image_size=image_size)
-        dev_dataset = End2EndAVEC2014Dataset(split="dev", device="cpu", max_frames=max_frames, image_size=image_size)
+        # 96-frame uniform sampling is the default 24G-friendly setup.
+        train_dataset = End2EndAVEC2014Dataset(
+            split="train",
+            device="cpu",
+            max_frames=max_frames,
+            image_size=image_size,
+            temporal_sample=args.temporal_sample,
+        )
+        dev_dataset = End2EndAVEC2014Dataset(
+            split="dev",
+            device="cpu",
+            max_frames=max_frames,
+            image_size=image_size,
+            temporal_sample=args.temporal_sample,
+        )
 
     # 单卡场景下使用普通 DataLoader
     train_sampler = None
@@ -115,17 +145,17 @@ def main() -> None:
     )
 
     # 构建当前 DNet 结构；若存在与该结构匹配的最新 checkpoint，则优先加载
-    # temporal_chunks=4：将 48 帧拆成 4 段，每段 12 帧，仅在 FEM+FPN 中分段前向，
+    # temporal_chunks=8：将 96 帧拆成 8 段，每段 12 帧，仅在 FEM+FPN 中分段前向，
     # 时序 Transformer 仍对完整 48 帧序列建模，保证与论文结构等价。
     # 单卡 GPU 训练时启用梯度检查点以节省显存。
     visible_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     use_ckpt = (device.type == "cuda") and (visible_gpus >= 1)
     model = End2EndDepressionModel(
-        temporal_chunks=4,
+        temporal_chunks=args.temporal_chunks,
         use_checkpoint_temporal=use_ckpt,
         use_checkpoint_vit=use_ckpt,
     ).to(device)
-    ckpt_path = os.path.join("checkpoints", "best_dnet_model.pth")
+    ckpt_path = args.out_ckpt
     resumed = False
     if os.path.exists(ckpt_path):
         print(f"Loading DNet weights from {ckpt_path}")
@@ -144,16 +174,16 @@ def main() -> None:
 
     # 超参数：Adam, lr=1e-4, weight_decay=5e-5, MSELoss
     # 若是从已有最优模型继续训练，则适当减小学习率，避免发散
-    base_lr = 1e-4
+    base_lr = args.lr
     if resumed:
         # 继续训练时进一步减小学习率，缓和 loss/MAE 的震荡
-        base_lr = 2e-5
+        base_lr = args.resume_lr
 
     optimizer = optim.Adam(
         model.parameters(),
         lr=base_lr,
         betas=(0.9, 0.999),
-        weight_decay=5e-5,
+        weight_decay=args.weight_decay,
     )
     criterion = nn.MSELoss()
 
@@ -171,9 +201,16 @@ def main() -> None:
     )
 
     # 论文中训练轮数约为 50，这里适当增加到 150，结合早停可灵活控制
-    num_epochs = 150
+    num_epochs = args.epochs
     best_mae = float("inf")
-    os.makedirs("checkpoints", exist_ok=True)
+    out_dir = os.path.dirname(ckpt_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    print(
+        f"[End2EndTrain] preprocessed_root={preprocessed_root} | max_frames={max_frames} | "
+        f"temporal_chunks={args.temporal_chunks} | out_ckpt={ckpt_path}"
+    )
 
     for epoch in range(num_epochs):
         model.train()
@@ -238,7 +275,7 @@ def main() -> None:
 
         if val_mae < best_mae:
             best_mae = val_mae
-            torch.save(model.state_dict(), os.path.join("checkpoints", "best_dnet_model.pth"))
+            torch.save(model.state_dict(), ckpt_path)
             print(f"  >>> New best DNet model saved (MAE: {val_mae:.4f})")
 
 

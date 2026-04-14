@@ -122,10 +122,15 @@ class SpatialDNet(nn.Module):
             nn.Linear(320, 1),
         )
 
-    def forward(self, full_face: torch.Tensor, local_face: torch.Tensor) -> torch.Tensor:
-        """full_face/local_face: (B, 3, H, W)"""
+    def extract_features(self, full_face: torch.Tensor, local_face: torch.Tensor) -> torch.Tensor:
+        """Return the 320-d pooled spatial feature before the frame regression head."""
         feats = self.spatial_backbone(full_face, local_face)  # (B, 320, H', W')
         feats = self.vit_block(feats)                         # (B, 320, H', W')
         pooled = self.gap(feats)                              # (B, 320, 1, 1)
+        return pooled.flatten(1)
+
+    def forward(self, full_face: torch.Tensor, local_face: torch.Tensor) -> torch.Tensor:
+        """full_face/local_face: (B, 3, H, W)"""
+        pooled = self.extract_features(full_face, local_face).view(-1, 320, 1, 1)
         preds = self.head(pooled)                             # (B, 1)
         return preds

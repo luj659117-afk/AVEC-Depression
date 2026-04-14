@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -10,6 +11,15 @@ import torch.amp as amp
 
 from data.end2end_dataset import End2EndAVEC2014Dataset, PreprocessedAVEC2014Dataset
 from models.temporal_vit import End2EndDepressionModel
+
+
+DEFAULT_PREPROCESSED_ROOT = os.path.join("data", "AVEC2014_preprocessed_uniform96")
+DEFAULT_CKPT_CANDIDATES = [
+    os.path.join("checkpoints", "best_dnet_model_uniform96_ft.pth"),
+    os.path.join("checkpoints", "best_dnet_model_uniform96.pth"),
+    os.path.join("checkpoints", "best_dnet_model_ft.pth"),
+    os.path.join("checkpoints", "best_dnet_model.pth"),
+]
 
 
 def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tuple[float, float, float]:
@@ -51,15 +61,23 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> Tupl
 def main() -> None:
     """在 AVEC2014 test 集上评估最终 DNet 模型。
 
-    优先使用微调后的 best_dnet_model_ft.pth，若不存在则退回 best_dnet_model.pth。
+    优先使用 uniform-96 端到端 checkpoint，若不存在则退回旧版 checkpoint。
     """
+
+    parser = argparse.ArgumentParser(description="Evaluate end-to-end temporal DNet on AVEC2014 test split.")
+    parser.add_argument("--preprocessed-root", default=DEFAULT_PREPROCESSED_ROOT)
+    parser.add_argument("--max-frames", type=int, default=96)
+    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="uniform")
+    parser.add_argument("--temporal-chunks", type=int, default=8)
+    parser.add_argument("--checkpoint", default=None)
+    args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 数据：优先使用预处理后的 AVEC2014
-    max_frames = 48
+    max_frames = args.max_frames
     image_size = 256
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
+    preprocessed_root = args.preprocessed_root
 
     use_preprocessed = False
     preprocessed_test_dir = os.path.join(preprocessed_root, "test")
@@ -71,7 +89,13 @@ def main() -> None:
         test_dataset = PreprocessedAVEC2014Dataset(split="test", preprocessed_root=preprocessed_root)
     else:
         print("[eval] Preprocessed data not found, falling back to online MTCNN preprocessing from raw videos (test split).")
-        test_dataset = End2EndAVEC2014Dataset(split="test", device="cpu", max_frames=max_frames, image_size=image_size)
+        test_dataset = End2EndAVEC2014Dataset(
+            split="test",
+            device="cpu",
+            max_frames=max_frames,
+            image_size=image_size,
+            temporal_sample=args.temporal_sample,
+        )
 
     test_loader = DataLoader(
         test_dataset,
@@ -86,23 +110,21 @@ def main() -> None:
     visible_gpus = torch.cuda.device_count() if device.type == "cuda" else 0
     use_ckpt = (device.type == "cuda") and (visible_gpus >= 1)
     model = End2EndDepressionModel(
-        temporal_chunks=4,
+        temporal_chunks=args.temporal_chunks,
         use_checkpoint_temporal=use_ckpt,
         use_checkpoint_vit=use_ckpt,
     ).to(device)
 
-    # 选择权重：优先使用微调后的 ft 模型
-    ckpt_ft = os.path.join("checkpoints", "best_dnet_model_ft.pth")
-    ckpt_base = os.path.join("checkpoints", "best_dnet_model.pth")
-
-    if os.path.exists(ckpt_ft):
-        ckpt_path = ckpt_ft
-        print(f"[eval] Loading finetuned weights from {ckpt_path}")
-    elif os.path.exists(ckpt_base):
-        ckpt_path = ckpt_base
-        print(f"[eval] Loading base best weights from {ckpt_path}")
+    if args.checkpoint is not None:
+        ckpt_path = args.checkpoint
+        if not os.path.exists(ckpt_path):
+            raise RuntimeError(f"[eval] Checkpoint not found: {ckpt_path}")
     else:
-        raise RuntimeError("[eval] No checkpoint found: neither best_dnet_model_ft.pth nor best_dnet_model.pth exists.")
+        ckpt_path = next((path for path in DEFAULT_CKPT_CANDIDATES if os.path.exists(path)), None)
+        if ckpt_path is None:
+            raise RuntimeError(f"[eval] No checkpoint found. Checked: {DEFAULT_CKPT_CANDIDATES}")
+
+    print(f"[eval] Loading weights from {ckpt_path}")
 
     state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state_dict)
