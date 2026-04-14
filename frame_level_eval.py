@@ -1,3 +1,4 @@
+import argparse
 import os
 import math
 from typing import Tuple
@@ -75,12 +76,21 @@ def evaluate(
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description="Evaluate a SpatialDNet checkpoint on AVEC2014 test split.")
+    parser.add_argument(
+        "--checkpoint",
+        default=None,
+        help="Optional checkpoint path. If omitted, use best_spatial_dnet_ft.pth then best_spatial_dnet.pth.",
+    )
+    parser.add_argument("--preprocessed-root", default=os.path.join("data", "AVEC2014_preprocessed"))
+    parser.add_argument("--eval-batch-size", type=int, default=64)
+    args = parser.parse_args()
+
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    preprocessed_root = os.path.join("data", "AVEC2014_preprocessed")
     test_dataset = FrameLevelAVEC2014EvalDataset(
         split="test",
-        preprocessed_root=preprocessed_root,
+        preprocessed_root=args.preprocessed_root,
     )
     test_loader = DataLoader(
         test_dataset,
@@ -93,23 +103,29 @@ def main() -> None:
 
     model = SpatialDNet(in_channels=3).to(device)
 
-    # 优先使用微调后的权重 best_spatial_dnet_ft.pth，若不存在则退回初始训练得到的 best_spatial_dnet.pth。
-    ckpt_ft = os.path.join("checkpoints", "best_spatial_dnet_ft.pth")
-    ckpt_base = os.path.join("checkpoints", "best_spatial_dnet.pth")
-    if os.path.exists(ckpt_ft):
-        ckpt_path = ckpt_ft
-        print(f"[FrameLevelEval] Using fine-tuned checkpoint: {ckpt_path}")
-    else:
-        ckpt_path = ckpt_base
+    if args.checkpoint is not None:
+        ckpt_path = args.checkpoint
         if not os.path.exists(ckpt_path):
-            raise RuntimeError(
-                f"Checkpoint not found: {ckpt_path}. Please run frame_level_train.py (and optionally frame_level_finetune.py) first."
-            )
+            raise RuntimeError(f"Checkpoint not found: {ckpt_path}")
+        print(f"[FrameLevelEval] Using specified checkpoint: {ckpt_path}")
+    else:
+        # 优先使用微调后的权重 best_spatial_dnet_ft.pth，若不存在则退回初始训练得到的 best_spatial_dnet.pth。
+        ckpt_ft = os.path.join("checkpoints", "best_spatial_dnet_ft.pth")
+        ckpt_base = os.path.join("checkpoints", "best_spatial_dnet.pth")
+        if os.path.exists(ckpt_ft):
+            ckpt_path = ckpt_ft
+            print(f"[FrameLevelEval] Using fine-tuned checkpoint: {ckpt_path}")
+        else:
+            ckpt_path = ckpt_base
+            if not os.path.exists(ckpt_path):
+                raise RuntimeError(
+                    f"Checkpoint not found: {ckpt_path}. Please run frame_level_train.py (and optionally frame_level_finetune.py) first."
+                )
 
     state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
     model.load_state_dict(state)
 
-    loss, mae, rmse = evaluate(model, test_loader, device)
+    loss, mae, rmse = evaluate(model, test_loader, device, eval_batch_size=args.eval_batch_size)
 
     print(
         f"[FrameLevelEval] Test Loss: {loss:.4f} | Test MAE: {mae:.4f} | Test RMSE: {rmse:.4f}"

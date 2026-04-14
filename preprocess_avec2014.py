@@ -1,11 +1,20 @@
 import os
+import argparse
 import torch
 
 from data.end2end_dataset import End2EndAVEC2014Dataset
 
 
 @torch.no_grad()
-def preprocess_split(split: str, out_root: str = "data/AVEC2014_preprocessed", max_frames: int = 48, image_size: int = 256) -> None:
+def preprocess_split(
+    split: str,
+    out_root: str = "data/AVEC2014_preprocessed",
+    max_frames: int = 48,
+    image_size: int = 256,
+    temporal_sample: str = "legacy",
+    device: str = "cpu",
+    overwrite: bool = False,
+) -> None:
     """离线预处理 AVEC2014：
 
     - 按论文设置从原始视频中抽帧、MTCNN 检测 + 仿射对齐
@@ -16,9 +25,10 @@ def preprocess_split(split: str, out_root: str = "data/AVEC2014_preprocessed", m
 
     dataset = End2EndAVEC2014Dataset(
         split=split,
-        device="cpu",  # 预处理统一在 CPU 上跑 MTCNN
+        device=device,
         max_frames=max_frames,
         image_size=image_size,
+        temporal_sample=temporal_sample,
     )
 
     out_dir = os.path.join(out_root, split)
@@ -29,7 +39,7 @@ def preprocess_split(split: str, out_root: str = "data/AVEC2014_preprocessed", m
     for video_path, sid, task in dataset.samples:
         key = f"{sid}_{task}"
         out_path = os.path.join(out_dir, f"{key}.pt")
-        if os.path.exists(out_path):
+        if os.path.exists(out_path) and not overwrite:
             print(f"[skip] {out_path} already exists")
             continue
 
@@ -50,8 +60,26 @@ def preprocess_split(split: str, out_root: str = "data/AVEC2014_preprocessed", m
 
 
 def main() -> None:
-    for split in ["train", "dev", "test"]:
-        preprocess_split(split)
+    parser = argparse.ArgumentParser(description="Preprocess AVEC2014 videos into full/local face tensors.")
+    parser.add_argument("--out-root", default="data/AVEC2014_preprocessed")
+    parser.add_argument("--max-frames", type=int, default=48)
+    parser.add_argument("--image-size", type=int, default=256)
+    parser.add_argument("--temporal-sample", choices=["legacy", "uniform", "random"], default="legacy")
+    parser.add_argument("--device", default="cpu")
+    parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument("--splits", nargs="+", default=["train", "dev", "test"], choices=["train", "dev", "test"])
+    args = parser.parse_args()
+
+    for split in args.splits:
+        preprocess_split(
+            split=split,
+            out_root=args.out_root,
+            max_frames=args.max_frames,
+            image_size=args.image_size,
+            temporal_sample=args.temporal_sample,
+            device=args.device,
+            overwrite=args.overwrite,
+        )
 
 
 if __name__ == "__main__":

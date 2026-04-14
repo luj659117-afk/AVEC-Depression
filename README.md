@@ -110,6 +110,16 @@ CUDA_VISIBLE_DEVICES=  # 可选，预处理主要跑在 CPU 上
 python preprocess_avec2014.py
 ```
 
+在 24G 显存约束下，更推荐使用 `uniform-48` 预处理：每个视频仍只保存 48 帧，但 48 帧均匀覆盖整段视频，而不是只取视频开头的 48 帧。该策略不会增加训练 / 评估阶段的显存占用：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python preprocess_avec2014.py \
+  --out-root data/AVEC2014_preprocessed_uniform48 \
+  --temporal-sample uniform \
+  --device cuda \
+  --max-frames 48
+```
+
 完成后，应在 `data/AVEC2014_preprocessed/train|dev|test` 下看到若干 `.pt` 文件，每个文件包含：
 
 - `full_faces`: `(T, 3, 256, 256)` 全脸序列张量（已归一化）；
@@ -153,6 +163,33 @@ CUDA_VISIBLE_DEVICES=1 python frame_level_eval.py
 - `Test Loss (MSE)`
 - `Test MAE`
 - `Test RMSE`
+
+若要评估指定 checkpoint 或指定预处理根目录，可使用：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python frame_level_eval.py \
+  --preprocessed-root data/AVEC2014_preprocessed_uniform48 \
+  --checkpoint checkpoints/best_spatial_dnet_ft.pth
+```
+
+当前实测中，在不重新训练模型的情况下，将 test 预处理从原始 48 帧策略切换为 `uniform-48`，指标由 `Test MAE: 7.7153 | Test RMSE: 9.6147` 改善到 `Test MAE: 7.6070 | Test RMSE: 9.4392`。
+
+### 6. 实验性：视频级 SpatialDNet 微调
+
+`video_level_finetune.py` 会从已有帧级 checkpoint 出发，每个视频采样 K 帧，对帧级预测取均值后使用视频级标签计算 loss。该路线用于验证“训练目标与视频级评估目标对齐”是否有效，会保存到独立 checkpoint，不覆盖当前最佳模型：
+
+```bash
+CUDA_VISIBLE_DEVICES=2 python video_level_finetune.py \
+  --preprocessed-root data/AVEC2014_preprocessed_uniform48 \
+  --frames-per-video 8 \
+  --batch-size 2 \
+  --grad-accum-steps 2 \
+  --lr 2e-6 \
+  --no-balanced-sampling \
+  --out-ckpt checkpoints/best_spatial_dnet_uniform_video_ft.pth
+```
+
+初步实验显示，全模型 video-level fine-tune 容易扰动已学好的空间表征，当前主要有效收益来自 `uniform-48` 预处理；若继续优化，建议优先尝试冻结 FEM/FPN/ViT 后只训练轻量视频聚合头。
 
 ## 训练说明
 
